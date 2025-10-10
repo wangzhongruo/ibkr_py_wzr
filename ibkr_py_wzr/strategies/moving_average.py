@@ -28,10 +28,26 @@ class MovingAverageCrossStrategy(SignalOnlyStrategy):
             raise ValueError("Data frame must contain a 'close' column")
 
         result = data.copy()
-        result["fast_ma"] = result["close"].rolling(self.fast_window).mean()
-        result["slow_ma"] = result["close"].rolling(self.slow_window).mean()
-        result["signal"] = 0
-        result.loc[result["fast_ma"] > result["slow_ma"], "signal"] = 1
-        result.loc[result["fast_ma"] < result["slow_ma"], "signal"] = -1
-        result["signal"] = result["signal"].ffill().fillna(0)
+        if isinstance(result.index, pd.MultiIndex):
+            grouped = result.groupby(level="symbol")
+            result["fast_ma"] = grouped["close"].transform(
+                lambda series: series.rolling(self.fast_window).mean()
+            )
+            result["slow_ma"] = grouped["close"].transform(
+                lambda series: series.rolling(self.slow_window).mean()
+            )
+            result["alpha"] = result["fast_ma"] - result["slow_ma"]
+            signal = pd.Series(0.0, index=result.index)
+            signal[result["fast_ma"] > result["slow_ma"]] = 1.0
+            signal[result["fast_ma"] < result["slow_ma"]] = -1.0
+            signal = signal.groupby(level="symbol").ffill().fillna(0.0)
+            result["signal"] = signal.astype(float)
+        else:
+            result["fast_ma"] = result["close"].rolling(self.fast_window).mean()
+            result["slow_ma"] = result["close"].rolling(self.slow_window).mean()
+            result["alpha"] = result["fast_ma"] - result["slow_ma"]
+            result["signal"] = 0.0
+            result.loc[result["fast_ma"] > result["slow_ma"], "signal"] = 1.0
+            result.loc[result["fast_ma"] < result["slow_ma"], "signal"] = -1.0
+            result["signal"] = result["signal"].ffill().fillna(0.0)
         return result

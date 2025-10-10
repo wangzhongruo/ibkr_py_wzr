@@ -25,7 +25,8 @@ import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from time import sleep
+from typing import Optional, Sequence
 
 import pandas as pd
 
@@ -149,6 +150,7 @@ class IBKRDataCenter:
 
         df.set_index("date", inplace=True)
         df.index = df.index.tz_localize("UTC").tz_convert(self.timezone)
+        df.index.name = "timestamp"
         df.rename(
             columns={
                 "volume": "volume",
@@ -177,6 +179,100 @@ class IBKRDataCenter:
             LOGGER.info("Saved data to %s", save_path)
 
         return df
+
+    def download_equity_universe(
+        self,
+        symbols: Sequence[str],
+        duration: str = "1 D",
+        start_datetime: Optional[datetime] = None,
+        end_datetime: Optional[datetime] = None,
+        what_to_show: str = "TRADES",
+        bar_size: str = "1 min",
+        save_to: Optional[Path] = None,
+        throttle_seconds: float = 0.0,
+    ) -> pd.DataFrame:
+        """Download historical bars for multiple symbols and combine the results.
+
+        Parameters
+        ----------
+        symbols:
+            Iterable of ticker symbols that should be requested from Interactive
+            Brokers.
+        duration, start_datetime, end_datetime, what_to_show, bar_size:
+            Identical to :meth:`download_intraday_bars`.
+        save_to:
+            Optional path used to persist the concatenated universe.  When
+            provided the combined data frame is stored as parquet or pickle.
+        throttle_seconds:
+            Optional delay inserted between requests to avoid pacing violations
+            for particularly large universes.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Multi-indexed data frame keyed by ``timestamp`` and ``symbol``.
+        """
+
+        unique_symbols = list(dict.fromkeys(symbols))
+        if not unique_symbols:
+            raise ValueError("symbols must contain at least one entry")
+
+        combined_frames: list[pd.DataFrame] = []
+        self.connect()
+
+        for idx, ticker in enumerate(unique_symbols, start=1):
+            LOGGER.info(
+                "Downloading data for %s (%s/%s)", ticker, idx, len(unique_symbols)
+            )
+            frame = self.download_intraday_bars(
+                ticker,
+                duration=duration,
+                start_datetime=start_datetime,
+                end_datetime=end_datetime,
+                what_to_show=what_to_show,
+                bar_size=bar_size,
+            )
+            if frame.empty:
+                LOGGER.warning("Skipping %s - no data returned", ticker)
+                continue
+
+            frame = frame.copy()
+            frame["symbol"] = ticker
+            frame.set_index("symbol", append=True, inplace=True)
+            frame = frame.reorder_levels(["timestamp", "symbol"])
+            frame.sort_index(inplace=True)
+            combined_frames.append(frame)
+
+            if throttle_seconds > 0 and idx < len(unique_symbols):
+                sleep(throttle_seconds)
+
+        if not combined_frames:
+            LOGGER.warning("No data downloaded for requested universe")
+            combined = pd.DataFrame()
+        else:
+            combined = pd.concat(combined_frames).sort_index()
+
+        if save_to is not None and not combined.empty:
+            save_path = Path(save_to)
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            suffix = save_path.suffix.lower()
+            if suffix in {".parquet", ".pq"}:
+                combined.to_parquet(save_path)
+            elif suffix in {".pkl", ".pickle"}:
+                combined.to_pickle(save_path)
+            else:  # pragma: no cover - defensive coding
+                raise ValueError(
+                    "save_to must have a .parquet, .pq, .pkl or .pickle extension"
+                )
+            LOGGER.info(
+                "Saved universe data (%s symbols) to %s",
+                len(combined.index.get_level_values("symbol").unique())
+                if not combined.empty
+                else 0,
+                save_path,
+            )
+
+        return combined
 
     @staticmethod
     def _duration_from_range(start: datetime, end: datetime) -> str:

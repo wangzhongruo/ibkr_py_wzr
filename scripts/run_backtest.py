@@ -6,6 +6,7 @@ import argparse
 import logging
 from datetime import datetime
 from pathlib import Path
+from typing import List
 
 import pandas as pd
 
@@ -17,7 +18,17 @@ LOGGER = logging.getLogger(__name__)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("symbol", help="Ticker symbol e.g. AAPL")
+    parser.add_argument("symbol", nargs="?", help="Ticker symbol e.g. AAPL")
+    parser.add_argument(
+        "--symbols",
+        nargs="+",
+        help="Additional tickers to include in the universe download",
+    )
+    parser.add_argument(
+        "--universe-file",
+        type=Path,
+        help="Path to a newline separated list of tickers",
+    )
     parser.add_argument(
         "--data-path",
         type=Path,
@@ -30,6 +41,11 @@ def parse_args() -> argparse.Namespace:
         "--duration",
         default="5 D",
         help="Historical duration to download (default: 5 D)",
+    )
+    parser.add_argument(
+        "--bar-size",
+        default="1 min",
+        help="Bar size for historical data (default: 1 min)",
     )
     parser.add_argument(
         "--fast",
@@ -67,6 +83,21 @@ def parse_args() -> argparse.Namespace:
         "--end",
         help="Optional end datetime for the backtest (e.g. '2024-01-20 16:00')",
     )
+    parser.add_argument(
+        "--top-n",
+        type=int,
+        help="Number of highest alpha symbols to hold long at each bar",
+    )
+    parser.add_argument(
+        "--bottom-n",
+        type=int,
+        help="Number of lowest alpha symbols to short at each bar",
+    )
+    parser.add_argument(
+        "--alpha-column",
+        default="alpha",
+        help="Alpha column produced by the strategy used for selection",
+    )
     return parser.parse_args()
 
 
@@ -77,6 +108,8 @@ def main() -> None:
     start_input = _parse_timestamp(args.start)
     end_input = _parse_timestamp(args.end)
 
+    symbols = _resolve_symbols(args)
+
     data_source: Path | pd.DataFrame
     if args.data_path is not None:
         if not args.data_path.exists():
@@ -84,20 +117,38 @@ def main() -> None:
             return
         data_source = args.data_path
     else:
+        if not symbols:
+            LOGGER.error(
+                "No symbols supplied. Provide a symbol/universe or --data-path."
+            )
+            return
         data_center = IBKRDataCenter()
         data_center.connect()
         try:
-            df = data_center.download_intraday_bars(
-                args.symbol,
-                duration=args.duration,
-                start_datetime=_normalise_request_timestamp(
-                    start_input, data_center.timezone
-                ),
-                end_datetime=_normalise_request_timestamp(
-                    end_input, data_center.timezone
-                ),
-                save_to=args.save,
+            start_request = _normalise_request_timestamp(
+                start_input, data_center.timezone
             )
+            end_request = _normalise_request_timestamp(
+                end_input, data_center.timezone
+            )
+            if len(symbols) == 1:
+                df = data_center.download_intraday_bars(
+                    symbols[0],
+                    duration=args.duration,
+                    start_datetime=start_request,
+                    end_datetime=end_request,
+                    bar_size=args.bar_size,
+                    save_to=args.save,
+                )
+            else:
+                df = data_center.download_equity_universe(
+                    symbols,
+                    duration=args.duration,
+                    start_datetime=start_request,
+                    end_datetime=end_request,
+                    bar_size=args.bar_size,
+                    save_to=args.save,
+                )
         finally:
             data_center.disconnect()
 
@@ -122,6 +173,9 @@ def main() -> None:
         strategy,
         start=start_input,
         end=end_input,
+        top_n=args.top_n,
+        bottom_n=args.bottom_n,
+        alpha_column=args.alpha_column,
     )
 
     LOGGER.info("Backtest statistics: %s", result.statistics)
@@ -149,6 +203,40 @@ def _normalise_request_timestamp(
         localized = localized.tz_convert(timezone)
 
     return localized.to_pydatetime()
+
+
+def _resolve_symbols(args: argparse.Namespace) -> List[str]:
+    symbols: List[str] = []
+    if args.symbol:
+        symbols.append(args.symbol)
+    if args.symbols:
+        symbols.extend(args.symbols)
+    if args.universe_file:
+        if not args.universe_file.exists():
+            LOGGER.error("Universe file %s does not exist", args.universe_file)
+        else:
+            symbols.extend(_read_universe_file(args.universe_file))
+
+    seen: set[str] = set()
+    ordered: List[str] = []
+    for ticker in symbols:
+        normalized = ticker.strip().upper()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        ordered.append(normalized)
+    return ordered
+
+
+def _read_universe_file(path: Path) -> List[str]:
+    tickers: List[str] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            cleaned = line.strip()
+            if not cleaned or cleaned.startswith("#"):
+                continue
+            tickers.append(cleaned)
+    return tickers
 
 
 if __name__ == "__main__":
