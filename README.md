@@ -29,6 +29,8 @@ pip install ib-insync pandas pyarrow
 
 ```python
 from pathlib import Path
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from ibkr_py_wzr import IBKRDataCenter
 
@@ -40,6 +42,14 @@ df = data_center.download_intraday_bars(
     "AAPL",
     duration="5 D",
     save_to=Path("data/aapl_1m.parquet"),
+)
+
+# Alternatively, specify explicit start/end times and a different bar size.
+df_hourly = data_center.download_intraday_bars(
+    "AAPL",
+    start_datetime=datetime(2024, 1, 1, tzinfo=ZoneInfo("America/New_York")),
+    end_datetime=datetime(2024, 1, 31, tzinfo=ZoneInfo("America/New_York")),
+    bar_size="1 hour",
 )
 
 data_center.disconnect()

@@ -1,15 +1,16 @@
 """Utilities for downloading historical data from Interactive Brokers.
 
 This module wraps ``ib_insync`` and provides a thin abstraction that makes it
-simple to download minute level US equity data.  The resulting data is returned
-as a :class:`pandas.DataFrame` and can optionally be persisted to disk.
+simple to download US equity data with a configurable bar size.  The resulting
+data is returned as a :class:`pandas.DataFrame` and can optionally be persisted
+to disk.
 
 Example
 -------
 >>> from ibkr_py_wzr.data_center import IBKRDataCenter
 >>> data_center = IBKRDataCenter()
 >>> data_center.connect()
->>> df = data_center.download_intraday_bars("AAPL", duration="5 D")
+>>> df = data_center.download_intraday_bars("AAPL", duration="5 D", bar_size="1 min")
 >>> data_center.disconnect()
 
 The data frame contains the standard OHLCV columns that are produced by
@@ -20,6 +21,7 @@ frame is also written as a parquet or csv file depending on the suffix.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -79,11 +81,13 @@ class IBKRDataCenter:
         self,
         symbol: str,
         duration: str = "1 D",
+        start_datetime: Optional[datetime] = None,
         end_datetime: Optional[datetime] = None,
         what_to_show: str = "TRADES",
+        bar_size: str = "1 min",
         save_to: Optional[Path] = None,
     ) -> pd.DataFrame:
-        """Download 1 minute bars for the provided symbol.
+        """Download historical bars for the provided symbol.
 
         Parameters
         ----------
@@ -91,10 +95,18 @@ class IBKRDataCenter:
             Ticker symbol of the US equity.
         duration:
             How far back to fetch data (Interactive Brokers duration string).
+            Ignored when ``start_datetime`` is provided.
+        start_datetime:
+            Optional start time for the historical request.  When provided the
+            ``duration`` argument is ignored and the request duration is
+            inferred from ``start_datetime`` and ``end_datetime``.
         end_datetime:
             The end time for the historical request.  ``None`` means "now".
         what_to_show:
             Which data type should be returned (``TRADES`` / ``MIDPOINT`` ...).
+        bar_size:
+            Granularity of the returned bars (``1 min``, ``1 hour``, ``1 day``
+            ...).  The value must be a valid Interactive Brokers bar size.
         save_to:
             Optional path for persisting the result.  Supported suffixes are
             ``.csv`` and ``.parquet``.
@@ -109,11 +121,23 @@ class IBKRDataCenter:
         contract = Stock(symbol, "SMART", "USD")
         self._ib.qualifyContracts(contract)
 
+        request_end = end_datetime
+        duration_str = duration
+
+        if start_datetime is not None:
+            if end_datetime is None:
+                request_end = datetime.now(tz=start_datetime.tzinfo)
+            if request_end <= start_datetime:
+                raise ValueError(
+                    "start_datetime must be before end_datetime"
+                )
+            duration_str = self._duration_from_range(start_datetime, request_end)
+
         bars: BarDataList = self._ib.reqHistoricalData(
             contract=contract,
-            endDateTime=end_datetime,
-            durationStr=duration,
-            barSizeSetting="1 min",
+            endDateTime=request_end,
+            durationStr=duration_str,
+            barSizeSetting=bar_size,
             whatToShow=what_to_show,
             useRTH=self.use_rth,
             formatDate=1,
@@ -152,6 +176,33 @@ class IBKRDataCenter:
             LOGGER.info("Saved data to %s", save_path)
 
         return df
+
+    @staticmethod
+    def _duration_from_range(start: datetime, end: datetime) -> str:
+        """Return an IBKR duration string that spans ``start`` to ``end``."""
+
+        delta = end - start
+        total_seconds = delta.total_seconds()
+        if total_seconds <= 0:
+            raise ValueError("end must be after start")
+
+        if total_seconds < 24 * 60 * 60:
+            return f"{math.ceil(total_seconds)} S"
+
+        days = total_seconds / (24 * 60 * 60)
+        if days < 7:
+            return f"{math.ceil(days)} D"
+
+        weeks = days / 7
+        if weeks < 52:
+            return f"{math.ceil(weeks)} W"
+
+        months = days / 30
+        if months < 12:
+            return f"{math.ceil(months)} M"
+
+        years = days / 365
+        return f"{math.ceil(years)} Y"
 
     @property
     def ib(self) -> IB:
