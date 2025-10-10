@@ -76,12 +76,15 @@ df = load_market_data(
 ### Running a backtest
 
 ```bash
-python scripts/run_backtest.py AAPL --duration "10 D" --fast 10 --slow 30
+python scripts/run_backtest.py AAPL --duration "10 D" --fast 10 --slow 30 \
+    --account-type MARGIN
 ```
 
 The script prints a summary table with total return, annualised return, Sharpe
-ratio and maximum drawdown.  If you already have parquet/pickle data on disk you
-can run a backtest directly from it and select a specific date range:
+ratio and maximum drawdown.  Supply `--account-type CASH` to prevent short
+positions when modelling a cash or retirement style account.  If you already
+have parquet/pickle data on disk you can run a backtest directly from it and
+select a specific date range:
 
 ```bash
 python scripts/run_backtest.py AAPL --data-path data/aapl_1m.parquet \
@@ -91,13 +94,25 @@ python scripts/run_backtest.py AAPL --data-path data/aapl_1m.parquet \
 ### Live trading
 
 ```bash
-python scripts/run_live_trading.py AAPL --quantity 10 --fast 10 --slow 30
+python scripts/run_live_trading.py AAPL --quantity 10 --fast 10 --slow 30 \
+    --account-type MARGIN
 ```
 
 The example strategy polls IBKR every minute and places market orders when the
-fast moving average crosses the slow moving average.  Commissions reported by
-Interactive Brokers are captured automatically once fills are confirmed, so no
-manual fee configuration is required.
+fast moving average crosses the slow moving average.  Set
+`--account-type CASH` to automatically suppress short signals for cash or IRA
+accounts.  Commissions reported by Interactive Brokers are captured
+automatically once fills are confirmed, so no manual fee configuration is
+required.
+
+### Commission fees from the IB API
+
+`IBKRTradingService` records the `commission` and `currency` fields from the
+`CommissionReport` objects supplied by Interactive Brokers once a trade is
+filled.  IBKR reports fees as negative values (debits) and rebates as positive
+values, already aggregated across exchange, regulatory and broker components.
+No manual inputs are needed—each order log entry includes the raw numbers
+returned by the API alongside the order identifier.
 
 ## Extending the framework
 

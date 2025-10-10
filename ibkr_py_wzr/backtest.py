@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import logging
 from dataclasses import dataclass
 from datetime import datetime, tzinfo as dt_tzinfo
 from pathlib import Path
@@ -13,18 +14,25 @@ from .strategies.base import Strategy
 
 TRADING_MINUTES_PER_YEAR = 252 * 390
 
+LOGGER = logging.getLogger(__name__)
+
 
 @dataclass
 class BacktestResult:
     """Container describing the outcome of a backtest run."""
 
     strategy_name: str
+    account_type: str
     signals: pd.DataFrame
     equity_curve: pd.Series
     statistics: Dict[str, float]
 
-    def to_dict(self) -> Dict[str, float]:
-        return {"strategy": self.strategy_name, **self.statistics}
+    def to_dict(self) -> Dict[str, Union[str, float]]:
+        return {
+            "strategy": self.strategy_name,
+            "account_type": self.account_type,
+            **self.statistics,
+        }
 
 
 class Backtester:
@@ -38,6 +46,9 @@ class Backtester:
         Flat commission applied each time the strategy changes its position.
     slippage_bps:
         Round trip slippage cost in basis points applied on fills.
+    account_type:
+        Simulated IBKR account type (e.g. ``MARGIN`` or ``CASH``).  Cash
+        accounts are prevented from taking short positions.
     """
 
     def __init__(
@@ -45,10 +56,13 @@ class Backtester:
         initial_cash: float = 100_000,
         commission_per_trade: float = 0.0,
         slippage_bps: float = 0.0,
+        account_type: str = "MARGIN",
     ) -> None:
         self.initial_cash = initial_cash
         self.commission_per_trade = commission_per_trade
         self.slippage_bps = slippage_bps
+        self.account_type = account_type.upper()
+        self._supports_shorting = self.account_type not in {"CASH", "IRA"}
 
     def run(
         self,
@@ -76,7 +90,9 @@ class Backtester:
             raise ValueError("Strategy must return a 'signal' column")
         merged = price_data.join(signals[["signal"]], how="left")
         merged["signal"] = merged["signal"].ffill().fillna(0)
+        merged["signal"] = self._apply_account_constraints(merged["signal"])
         merged["position"] = merged["signal"].shift(1).fillna(0)
+        merged["position"] = self._apply_account_constraints(merged["position"])
 
         per_trade_cost = self.commission_per_trade
         slippage = self.slippage_bps / 10_000
@@ -92,6 +108,7 @@ class Backtester:
         statistics = self._create_statistics(merged, equity_curve)
         return BacktestResult(
             strategy_name=strategy.name,
+            account_type=self.account_type,
             signals=signals,
             equity_curve=equity_curve,
             statistics=statistics,
@@ -108,6 +125,19 @@ class Backtester:
             self.run(data, strategy, start=start, end=end)
             for strategy in strategies
         ]
+
+    def _apply_account_constraints(self, series: pd.Series) -> pd.Series:
+        """Clip unsupported positions based on ``account_type``."""
+
+        if self._supports_shorting:
+            return series
+
+        if (series < 0).any():
+            LOGGER.info(
+                "Clipping short positions for cash account backtest (account type %s)",
+                self.account_type,
+            )
+        return series.clip(lower=0)
 
     def _create_statistics(
         self, merged: pd.DataFrame, equity_curve: pd.Series

@@ -50,6 +50,11 @@ def parse_args() -> argparse.Namespace:
         help="Initial capital for the backtest",
     )
     parser.add_argument(
+        "--account-type",
+        default="MARGIN",
+        help="IBKR account type to emulate (e.g. MARGIN, CASH)",
+    )
+    parser.add_argument(
         "--save",
         type=Path,
         help="Optional path to store the downloaded data as parquet/pickle",
@@ -108,7 +113,10 @@ def main() -> None:
         slow_window=args.slow,
     )
 
-    backtester = Backtester(initial_cash=args.initial_cash)
+    backtester = Backtester(
+        initial_cash=args.initial_cash,
+        account_type=args.account_type,
+    )
     result = backtester.run(
         data_source,
         strategy,

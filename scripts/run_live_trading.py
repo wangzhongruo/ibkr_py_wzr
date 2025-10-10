@@ -45,6 +45,11 @@ def parse_args() -> argparse.Namespace:
         default=120,
         help="Number of minutes of history to provide to the strategy",
     )
+    parser.add_argument(
+        "--account-type",
+        default="MARGIN",
+        help="IBKR account type of the connected account (e.g. MARGIN, CASH)",
+    )
     return parser.parse_args()
 
 
@@ -65,6 +70,7 @@ async def main_async() -> None:
         data_center=data_center,
         poll_interval=args.poll_interval,
         lookback_minutes=args.lookback,
+        account_type=args.account_type,
     )
 
     strategy = build_strategy(args)

@@ -29,16 +29,23 @@ class IBKRTradingService:
     lookback_minutes:
         Minimum amount of history (in minutes) to feed to the strategy when
         generating live signals.
+    account_type:
+        IBKR account type the session is running against (``MARGIN`` by
+        default).  Cash style accounts automatically suppress short signals.
     """
 
     data_center: IBKRDataCenter
     poll_interval: int = 60
     lookback_minutes: int = 120
+    account_type: str = "MARGIN"
     _ib: IB = field(init=False, repr=False)
     _current_signal: int = field(default=0, init=False)
+    _supports_shorting: bool = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._ib = self.data_center.ib
+        self.account_type = self.account_type.upper()
+        self._supports_shorting = self.account_type not in {"CASH", "IRA"}
 
     def connect(self) -> None:
         self.data_center.connect()
@@ -61,6 +68,9 @@ class IBKRTradingService:
 
         commission_report = self._extract_commission_report(trade)
         if commission_report is not None:
+            # IBKR reports fees as negative numbers (debits) and rebates as
+            # positive amounts.  The value already includes exchange,
+            # regulatory and broker components.
             LOGGER.info(
                 "Placed %s order for %s x %s (order id %s, commission %s %s)",
                 action,
@@ -116,6 +126,7 @@ class IBKRTradingService:
                     LOGGER.warning("No data returned for %s, retrying", symbol)
                 else:
                     signal = strategy.generate_live_signal(df)
+                    signal = self._apply_account_constraints(signal)
                     await self._maybe_rebalance(symbol, signal, quantity)
 
                 if stop_event is not None and stop_event.is_set():
@@ -156,3 +167,14 @@ class IBKRTradingService:
                 return report
 
         return None
+
+    def _apply_account_constraints(self, signal: int) -> int:
+        """Return ``signal`` adjusted for the configured ``account_type``."""
+
+        if self._supports_shorting or signal >= 0:
+            return int(signal)
+
+        LOGGER.info(
+            "Suppressing short signal %s for cash-style account type %s", signal, self.account_type
+        )
+        return 0
