@@ -13,8 +13,9 @@ Example
 >>> data_center.disconnect()
 
 The data frame contains the standard OHLCV columns that are produced by
-``reqHistoricalData``.  If a ``save_to`` path is supplied the data frame is also
-written as a parquet or csv file depending on the suffix.
+``reqHistoricalData``: ``open``, ``high``, ``low``, ``close``, ``volume``,
+``bar_count`` and ``average_price``.  If a ``save_to`` path is supplied the data
+frame is also written as a parquet or csv file depending on the suffix.
 """
 from __future__ import annotations
 

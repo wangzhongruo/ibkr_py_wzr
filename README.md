@@ -28,17 +28,28 @@ pip install ib-insync pandas pyarrow
 ### Downloading historical data
 
 ```python
+from pathlib import Path
+
 from ibkr_py_wzr import IBKRDataCenter
 
 data_center = IBKRDataCenter()
 data_center.connect()
-df = data_center.download_intraday_bars("AAPL", duration="5 D")
+
+# Download the last five days of one minute bars for Apple and persist to disk.
+df = data_center.download_intraday_bars(
+    "AAPL",
+    duration="5 D",
+    save_to=Path("data/aapl_1m.parquet"),
+)
+
 data_center.disconnect()
 ```
 
 The returned `DataFrame` is indexed by timezone aware timestamps (New York
-timezone by default).  Pass a `Path` to `save_to` if you would like to persist
-it as CSV or parquet.
+timezone by default) and contains the standard OHLCV fields produced by
+Interactive Brokers: `open`, `high`, `low`, `close`, `volume`, `bar_count` and
+`average_price`.  Pass a `Path` to `save_to` if you would like to persist it as
+CSV or parquet.
 
 ### Running a backtest
 
