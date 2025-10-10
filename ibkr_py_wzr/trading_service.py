@@ -46,19 +46,38 @@ class IBKRTradingService:
     def disconnect(self) -> None:
         self.data_center.disconnect()
 
-    def place_market_order(self, symbol: str, quantity: int, action: str) -> None:
-        """Submit a market order."""
+    async def place_market_order(self, symbol: str, quantity: int, action: str) -> None:
+        """Submit a market order and log IBKR reported commissions."""
+
         contract = Stock(symbol, "SMART", "USD")
-        self._ib.qualifyContracts(contract)
+        await self._ib.qualifyContractsAsync(contract)
+
         order = MarketOrder(action=action, totalQuantity=quantity)
-        trade = self._ib.placeOrder(contract, order)
-        LOGGER.info(
-            "Placed %s order for %s x %s (order id %s)",
-            action,
-            quantity,
-            symbol,
-            trade.order.orderId,
-        )
+        trade = await self._ib.placeOrderAsync(contract, order)
+
+        # Wait for the order to complete so the commission report becomes available.
+        while not trade.isDone():
+            await self._ib.waitOnUpdateAsync(timeout=1)
+
+        commission_report = self._extract_commission_report(trade)
+        if commission_report is not None:
+            LOGGER.info(
+                "Placed %s order for %s x %s (order id %s, commission %s %s)",
+                action,
+                quantity,
+                symbol,
+                trade.order.orderId,
+                commission_report.commission,
+                commission_report.currency,
+            )
+        else:
+            LOGGER.info(
+                "Placed %s order for %s x %s (order id %s, commission pending)",
+                action,
+                quantity,
+                symbol,
+                trade.order.orderId,
+            )
 
     async def run_live_strategy(
         self,
@@ -121,5 +140,19 @@ class IBKRTradingService:
             # Go flat by reversing the existing position if needed.
             action = "SELL" if self._current_signal > 0 else "BUY"
 
-        self.place_market_order(symbol, quantity, action)
+        await self.place_market_order(symbol, quantity, action)
         self._current_signal = signal
+
+    @staticmethod
+    def _extract_commission_report(trade) -> Optional[object]:
+        """Return the most relevant commission report from ``trade`` if available."""
+
+        if trade.commissionReport is not None:
+            return trade.commissionReport
+
+        for fill in getattr(trade, "fills", []):
+            report = getattr(fill, "commissionReport", None)
+            if report is not None:
+                return report
+
+        return None

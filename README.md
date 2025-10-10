@@ -95,7 +95,9 @@ python scripts/run_live_trading.py AAPL --quantity 10 --fast 10 --slow 30
 ```
 
 The example strategy polls IBKR every minute and places market orders when the
-fast moving average crosses the slow moving average.
+fast moving average crosses the slow moving average.  Commissions reported by
+Interactive Brokers are captured automatically once fills are confirmed, so no
+manual fee configuration is required.
 
 ## Extending the framework
 
