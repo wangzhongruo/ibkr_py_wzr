@@ -16,7 +16,7 @@ Example
 The data frame contains the standard OHLCV columns that are produced by
 ``reqHistoricalData``: ``open``, ``high``, ``low``, ``close``, ``volume``,
 ``bar_count`` and ``average_price``.  If a ``save_to`` path is supplied the data
-frame is also written as a parquet or csv file depending on the suffix.
+frame is also written as a parquet or pickle file depending on the suffix.
 """
 from __future__ import annotations
 
@@ -109,7 +109,7 @@ class IBKRDataCenter:
             ...).  The value must be a valid Interactive Brokers bar size.
         save_to:
             Optional path for persisting the result.  Supported suffixes are
-            ``.csv`` and ``.parquet``.
+            ``.parquet``, ``.pq``, ``.pkl`` and ``.pickle``.
 
         Returns
         -------
@@ -165,13 +165,14 @@ class IBKRDataCenter:
         if save_to is not None:
             save_path = Path(save_to)
             save_path.parent.mkdir(parents=True, exist_ok=True)
-            if save_path.suffix.lower() == ".csv":
-                df.to_csv(save_path)
-            elif save_path.suffix.lower() in {".parquet", ".pq"}:
+            suffix = save_path.suffix.lower()
+            if suffix in {".parquet", ".pq"}:
                 df.to_parquet(save_path)
+            elif suffix in {".pkl", ".pickle"}:
+                df.to_pickle(save_path)
             else:  # pragma: no cover - defensive coding
                 raise ValueError(
-                    "save_to must have a .csv or .parquet extension"
+                    "save_to must have a .parquet, .pq, .pkl or .pickle extension"
                 )
             LOGGER.info("Saved data to %s", save_path)
 

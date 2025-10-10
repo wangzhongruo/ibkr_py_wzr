@@ -59,7 +59,19 @@ The returned `DataFrame` is indexed by timezone aware timestamps (New York
 timezone by default) and contains the standard OHLCV fields produced by
 Interactive Brokers: `open`, `high`, `low`, `close`, `volume`, `bar_count` and
 `average_price`.  Pass a `Path` to `save_to` if you would like to persist it as
-CSV or parquet.
+parquet or pickle for efficient reuse.
+
+Saved files can be reloaded later without hitting the IBKR API:
+
+```python
+from ibkr_py_wzr import load_market_data
+
+df = load_market_data(
+    "data/aapl_1m.parquet",
+    start="2024-01-10 09:30",
+    end="2024-01-20 16:00",
+)
+```
 
 ### Running a backtest
 
@@ -68,7 +80,13 @@ python scripts/run_backtest.py AAPL --duration "10 D" --fast 10 --slow 30
 ```
 
 The script prints a summary table with total return, annualised return, Sharpe
-ratio and maximum drawdown.
+ratio and maximum drawdown.  If you already have parquet/pickle data on disk you
+can run a backtest directly from it and select a specific date range:
+
+```bash
+python scripts/run_backtest.py AAPL --data-path data/aapl_1m.parquet \
+    --start "2024-01-10 09:30" --end "2024-01-20 16:00"
+```
 
 ### Live trading
 
