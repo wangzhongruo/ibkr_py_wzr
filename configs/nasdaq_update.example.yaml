@@ -13,6 +13,12 @@ data_center:
   # this directory are inspected to decide whether an incremental or full
   # refresh is required.
   data_directory: data/nasdaq
+  # HTTP timeout (seconds) and retry behaviour for downloading the official
+  # NASDAQ listings file. Increase these values if your environment frequently
+  # times out when contacting ftp.nasdaqtrader.com.
+  nasdaq_listing_timeout: 45
+  nasdaq_listing_retries: 5
+  nasdaq_listing_retry_backoff: 10
 update:
   # Historical bar size requested from IBKR (e.g. "1 min", "1 hour", "1 day")
   bar_size: "1 min"

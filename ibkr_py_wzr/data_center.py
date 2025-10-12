@@ -66,6 +66,9 @@ class IBKRDataCenter:
         When ``True`` only Regular Trading Hours data is returned.
     timezone:
         Target timezone (as a tz database string) for the returned data frame.
+    nasdaq_listing_timeout, nasdaq_listing_retries, nasdaq_listing_retry_backoff:
+        Control the timeout and retry behaviour when downloading the NASDAQ
+        listings file that seeds the universe updater.
     """
 
     host: str = "127.0.0.1"
@@ -77,6 +80,9 @@ class IBKRDataCenter:
     nasdaq_listing_url: str = (
         "https://ftp.nasdaqtrader.com/dynamic/symdir/nasdaqtraded.txt"
     )
+    nasdaq_listing_timeout: float = 30.0
+    nasdaq_listing_retries: int = 3
+    nasdaq_listing_retry_backoff: float = 5.0
     _ib: IB = field(default_factory=IB, init=False, repr=False)
 
     def connect(self) -> None:
@@ -330,8 +336,35 @@ class IBKRDataCenter:
         """Return the complete list of NASDAQ-listed equities."""
 
         LOGGER.info("Downloading NASDAQ listings from %s", self.nasdaq_listing_url)
-        response = requests.get(self.nasdaq_listing_url, timeout=30)
-        response.raise_for_status()
+
+        retries = max(1, int(self.nasdaq_listing_retries))
+        timeout = float(self.nasdaq_listing_timeout)
+        backoff = max(0.0, float(self.nasdaq_listing_retry_backoff))
+
+        last_error: Optional[Exception] = None
+        response: Optional[requests.Response] = None
+        for attempt in range(1, retries + 1):
+            try:
+                response = requests.get(self.nasdaq_listing_url, timeout=timeout)
+                response.raise_for_status()
+                break
+            except requests.RequestException as exc:
+                last_error = exc
+                LOGGER.warning(
+                    "Attempt %s/%s to download NASDAQ listings failed: %s",
+                    attempt,
+                    retries,
+                    exc,
+                )
+                if attempt == retries:
+                    break
+                if backoff:
+                    sleep(backoff * attempt)
+
+        if response is None or response.status_code >= 400:
+            raise RuntimeError(
+                "Unable to download NASDAQ listings after multiple attempts"
+            ) from last_error
 
         buffer = io.StringIO(response.text)
         listings = pd.read_csv(
@@ -570,6 +603,9 @@ class IBKRDataCenter:
                 timezone=self.timezone,
                 data_directory=data_dir,
                 nasdaq_listing_url=self.nasdaq_listing_url,
+                nasdaq_listing_timeout=self.nasdaq_listing_timeout,
+                nasdaq_listing_retries=self.nasdaq_listing_retries,
+                nasdaq_listing_retry_backoff=self.nasdaq_listing_retry_backoff,
             )
             try:
                 worker_center.connect()
@@ -796,6 +832,18 @@ def main() -> None:
         data_center_config["data_directory"], Path
     ):
         data_center_config["data_directory"] = Path(data_center_config["data_directory"])
+    if "nasdaq_listing_timeout" in data_center_config:
+        data_center_config["nasdaq_listing_timeout"] = float(
+            data_center_config["nasdaq_listing_timeout"]
+        )
+    if "nasdaq_listing_retry_backoff" in data_center_config:
+        data_center_config["nasdaq_listing_retry_backoff"] = float(
+            data_center_config["nasdaq_listing_retry_backoff"]
+        )
+    if "nasdaq_listing_retries" in data_center_config:
+        data_center_config["nasdaq_listing_retries"] = max(
+            1, int(data_center_config["nasdaq_listing_retries"])
+        )
     if "throttle_seconds" in update_config:
         update_config["throttle_seconds"] = float(update_config["throttle_seconds"])
     if "progress" in update_config:
