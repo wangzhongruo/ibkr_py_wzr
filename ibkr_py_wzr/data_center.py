@@ -26,6 +26,8 @@ from __future__ import annotations
 import io
 import logging
 import math
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -431,6 +433,7 @@ class IBKRDataCenter:
         data_directory: Optional[Path] = None,
         throttle_seconds: float = 0.2,
         progress: bool = True,
+        max_workers: int = 1,
     ) -> None:
         """Download and incrementally update NASDAQ equity data.
 
@@ -440,6 +443,12 @@ class IBKRDataCenter:
             When ``True`` and :mod:`tqdm` is installed a progress bar is rendered
             while syncing the exchange universe.  Falls back to logging when the
             dependency is unavailable.
+        max_workers:
+            Number of worker threads used for the download.  ``1`` preserves the
+            historical single-threaded behaviour while larger values spawn
+            additional background workers that each maintain their own IBKR
+            connection.  Each worker uses an incremented ``client_id`` to avoid
+            clashes with the primary session.
         """
 
         symbols = self.fetch_nasdaq_symbols()
@@ -448,40 +457,111 @@ class IBKRDataCenter:
         data_dir = Path(data_directory) if data_directory else self.data_directory
         data_dir.mkdir(parents=True, exist_ok=True)
 
-        self.connect()
+        max_workers = max(1, int(max_workers))
         progress_enabled = bool(progress and tqdm is not None)
         if progress and not progress_enabled:
             LOGGER.info(
                 "Progress display requested but tqdm is not installed; falling back to logging"
             )
 
-        if progress_enabled:
-            progress_bar = tqdm(symbols, desc="Updating NASDAQ history", unit="symbol")
-            iterator = enumerate(progress_bar, start=1)
-        else:
-            progress_bar = None
-            iterator = enumerate(symbols, start=1)
+        total_symbols = len(symbols)
+        if total_symbols == 0:
+            LOGGER.warning("No NASDAQ symbols resolved; nothing to update")
+            return
 
-        try:
-            for idx, symbol in iterator:
+        if max_workers == 1:
+            self.connect()
+            if progress_enabled:
+                progress_bar = tqdm(symbols, desc="Updating NASDAQ history", unit="symbol")
+                iterator = enumerate(progress_bar, start=1)
+            else:
+                progress_bar = None
+                iterator = enumerate(symbols, start=1)
+
+            try:
+                for idx, symbol in iterator:
+                    if progress_bar is not None:
+                        progress_bar.set_postfix_str(symbol)
+                    else:
+                        LOGGER.info("(%s/%s) Updating %s", idx, total_symbols, symbol)
+                    self.update_symbol_history(
+                        symbol,
+                        bar_size=bar_size,
+                        what_to_show=what_to_show,
+                        start_datetime=start_dt,
+                        end_datetime=end_datetime,
+                        data_directory=data_dir,
+                    )
+                    if throttle_seconds and idx < total_symbols:
+                        sleep(throttle_seconds)
+            finally:
                 if progress_bar is not None:
-                    progress_bar.set_postfix_str(symbol)
-                else:
-                    LOGGER.info("(%s/%s) Updating %s", idx, len(symbols), symbol)
-                self.update_symbol_history(
-                    symbol,
-                    bar_size=bar_size,
-                    what_to_show=what_to_show,
-                    start_datetime=start_dt,
-                    end_datetime=end_datetime,
-                    data_directory=data_dir,
-                )
-                if throttle_seconds and idx < len(symbols):
-                    sleep(throttle_seconds)
-        finally:
-            if progress_bar is not None:
-                progress_bar.close()
-            self.disconnect()
+                    progress_bar.close()
+                self.disconnect()
+            return
+
+        # Parallel execution path -------------------------------------------------
+        chunks = [symbols[i::max_workers] for i in range(max_workers)]
+        chunks = [chunk for chunk in chunks if chunk]
+        progress_bar = tqdm(
+            total=total_symbols,
+            desc="Updating NASDAQ history",
+            unit="symbol",
+            disable=not progress_enabled,
+        ) if progress_enabled else None
+
+        completed = 0
+        completed_lock = threading.Lock()
+
+        def worker(worker_index: int, chunk: Sequence[str]) -> None:
+            nonlocal completed
+            client_id = self.client_id + worker_index + 1
+            worker_center = IBKRDataCenter(
+                host=self.host,
+                port=self.port,
+                client_id=client_id,
+                use_rth=self.use_rth,
+                timezone=self.timezone,
+                data_directory=data_dir,
+                nasdaq_listing_url=self.nasdaq_listing_url,
+            )
+            try:
+                worker_center.connect()
+                for local_index, symbol in enumerate(chunk, start=1):
+                    try:
+                        worker_center.update_symbol_history(
+                            symbol,
+                            bar_size=bar_size,
+                            what_to_show=what_to_show,
+                            start_datetime=start_dt,
+                            end_datetime=end_datetime,
+                            data_directory=data_dir,
+                        )
+                    except Exception:  # pragma: no cover - robust worker handling
+                        LOGGER.exception("Worker %s failed updating %s", worker_index + 1, symbol)
+                    if progress_bar is not None:
+                        progress_bar.update(1)
+                    else:
+                        with completed_lock:
+                            completed += 1
+                            LOGGER.info("(%s/%s) Updated %s", completed, total_symbols, symbol)
+                    if throttle_seconds and local_index < len(chunk):
+                        sleep(throttle_seconds)
+            finally:
+                worker_center.disconnect()
+
+        with ThreadPoolExecutor(max_workers=len(chunks)) as executor:
+            futures = [
+                executor.submit(worker, idx, chunk) for idx, chunk in enumerate(chunks)
+            ]
+            for future in futures:
+                try:
+                    future.result()
+                except Exception:  # pragma: no cover - defensive aggregate handling
+                    LOGGER.exception("A background worker terminated unexpectedly")
+
+        if progress_bar is not None:
+            progress_bar.close()
 
     @staticmethod
     def _bar_size_to_offset(bar_size: str) -> pd.Timedelta:
@@ -607,6 +687,12 @@ def main() -> None:
         help="Seconds to wait between requests (overrides config)",
     )
     parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=None,
+        help="Number of worker threads used for downloads (overrides config)",
+    )
+    parser.add_argument(
         "--no-progress",
         action="store_true",
         help="Disable tqdm progress bars even when the dependency is installed",
@@ -635,6 +721,8 @@ def main() -> None:
         update_config["end_datetime"] = args.end_date
     if args.throttle is not None:
         update_config["throttle_seconds"] = args.throttle
+    if args.max_workers is not None:
+        update_config["max_workers"] = args.max_workers
     if args.no_progress:
         update_config["progress"] = False
 
@@ -643,6 +731,7 @@ def main() -> None:
         "what_to_show": "TRADES",
         "throttle_seconds": 0.2,
         "progress": True,
+        "max_workers": 1,
     }
     for key, value in defaults.items():
         update_config.setdefault(key, value)
@@ -665,6 +754,8 @@ def main() -> None:
         update_config["throttle_seconds"] = float(update_config["throttle_seconds"])
     if "progress" in update_config:
         update_config["progress"] = bool(update_config["progress"])
+    if "max_workers" in update_config:
+        update_config["max_workers"] = max(1, int(update_config["max_workers"]))
 
     data_center = IBKRDataCenter(**data_center_config)
     data_center.update_nasdaq_history(

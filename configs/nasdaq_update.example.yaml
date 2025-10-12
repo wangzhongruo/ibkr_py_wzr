@@ -20,6 +20,8 @@ update:
   start_date: 2011-01-01
   # Optional end timestamp (ISO 8601). Omit to download up to "now".
   # end_datetime: 2024-01-31T16:00:00
+  # Number of background workers (each uses an incremented client_id)
+  max_workers: 1
   # Delay between historical requests to avoid pacing violations
   throttle_seconds: 0.25
   # Toggle tqdm-based progress bars (requires the tqdm package)

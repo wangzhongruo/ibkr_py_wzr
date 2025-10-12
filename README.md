@@ -88,6 +88,7 @@ update:
   bar_size: "1 min"
   what_to_show: TRADES
   start_date: 2011-01-01
+  max_workers: 1
   throttle_seconds: 0.25
   progress: true
 ```
@@ -103,7 +104,10 @@ file, making it straightforward to reuse defaults while experimenting with
 different backfill windows or data directories.  Progress bars are enabled by
 default when [`tqdm`](https://tqdm.github.io/) is installed; pass
 `--no-progress` on the command line or set `progress: false` in the YAML file to
-fall back to plain logging.
+fall back to plain logging.  Increase `max_workers` to spread the download
+across several IBKR connections (each worker automatically increments the
+configured `client_id` so that the sessions remain unique) when your pacing
+limits and hardware allow.
 
 > **Note**
 > The historical bars returned by Interactive Brokers reflect the market data
