@@ -1,0 +1,26 @@
+data_center:
+  # Hostname/IP of your TWS or IB Gateway session
+  host: 127.0.0.1
+  # Port number (TWS paper trading = 7497, live trading = 7496 by default)
+  port: 7497
+  # Client ID used when connecting via ib_insync (must be unique per session)
+  client_id: 7
+  # Whether to limit downloads to Regular Trading Hours
+  use_rth: true
+  # IANA timezone name used to localise timestamps
+  timezone: America/New_York
+  # Directory where per-symbol parquet files will be stored
+  data_directory: data/nasdaq
+update:
+  # Historical bar size requested from IBKR (e.g. "1 min", "1 hour", "1 day")
+  bar_size: "1 min"
+  # Data type requested (TRADES, MIDPOINT, BID, ASK, etc.)
+  what_to_show: TRADES
+  # Initial backfill start date for first-time syncs (ISO 8601 format)
+  start_date: 2011-01-01
+  # Optional end timestamp (ISO 8601). Omit to download up to "now".
+  # end_datetime: 2024-01-31T16:00:00
+  # Delay between historical requests to avoid pacing violations
+  throttle_seconds: 0.25
+  # Toggle tqdm-based progress bars (requires the tqdm package)
+  progress: true
