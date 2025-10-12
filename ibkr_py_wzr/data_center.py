@@ -381,22 +381,68 @@ class IBKRDataCenter:
             existing = None
 
         tz = ZoneInfo(self.timezone)
-        request_start = self._ensure_timezone(start_datetime, tz)
-        if existing is not None and not existing.empty:
-            last_timestamp = existing.index.max()
-            if last_timestamp.tzinfo is None:
-                last_timestamp = last_timestamp.tz_localize(tz)
-            else:
-                last_timestamp = last_timestamp.astimezone(tz)
-            request_start = max(request_start, last_timestamp + self._bar_size_to_offset(bar_size))
+        bar_offset = self._bar_size_to_offset(bar_size)
+        tolerance_start = pd.Timedelta(days=7)
+        tolerance_end = max(bar_offset * 5, pd.Timedelta(days=2))
 
-        if end_datetime is not None:
-            request_end = self._ensure_timezone(end_datetime, tz)
-            if request_start >= request_end:
-                LOGGER.info("%s already up to date (no newer data before %s)", symbol, request_end)
-                return
-        else:
-            request_end = None
+        target_start = self._ensure_timezone(start_datetime, tz)
+        request_start = target_start
+
+        request_end = (
+            self._ensure_timezone(end_datetime, tz) if end_datetime is not None else None
+        )
+        target_end = request_end if request_end is not None else datetime.now(tz)
+
+        if existing is not None and not existing.empty:
+            earliest = existing.index.min()
+            latest = existing.index.max()
+
+            if earliest.tzinfo is None:
+                earliest = earliest.tz_localize(tz)
+            else:
+                earliest = earliest.astimezone(tz)
+
+            if latest.tzinfo is None:
+                latest = latest.tz_localize(tz)
+            else:
+                latest = latest.astimezone(tz)
+
+            missing_start = earliest > (target_start + tolerance_start)
+            missing_end = latest < (target_end - tolerance_end)
+
+            if missing_start or missing_end:
+                LOGGER.info(
+                    (
+                        "Existing history for %s spans %s to %s but does not cover the "
+                        "requested range %s to %s; performing a full refresh"
+                    ),
+                    symbol,
+                    earliest,
+                    latest,
+                    target_start,
+                    target_end,
+                )
+                existing = None
+            else:
+                if latest >= target_end - bar_offset:
+                    LOGGER.info(
+                        "%s already contains data through %s; skipping incremental update",
+                        symbol,
+                        latest,
+                    )
+                    return
+                request_start = max(target_start, latest + bar_offset)
+
+        if existing is None:
+            request_start = target_start
+
+        if request_end is not None and request_start >= request_end:
+            LOGGER.info(
+                "%s already up to date (no newer data before %s)",
+                symbol,
+                request_end,
+            )
+            return
 
         new_data = self.download_intraday_bars(
             symbol,

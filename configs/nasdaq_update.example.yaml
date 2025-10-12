@@ -9,7 +9,9 @@ data_center:
   use_rth: true
   # IANA timezone name used to localise timestamps
   timezone: America/New_York
-  # Directory where per-symbol parquet files will be stored
+  # Directory where per-symbol parquet files will be stored. Existing files in
+  # this directory are inspected to decide whether an incremental or full
+  # refresh is required.
   data_directory: data/nasdaq
 update:
   # Historical bar size requested from IBKR (e.g. "1 min", "1 hour", "1 day")
