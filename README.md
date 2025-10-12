@@ -72,6 +72,42 @@ Interactive Brokers: `open`, `high`, `low`, `close`, `volume`, `bar_count` and
 Pass a `Path` to `save_to` if you would like to persist the results as parquet
 or pickle for efficient reuse.
 
+The convenience CLI (`python -m ibkr_py_wzr.data_center`) also accepts a YAML
+configuration file so that large universes can be refreshed without typing long
+command lines.  Create a file such as:
+
+```yaml
+data_center:
+  host: 127.0.0.1
+  port: 7497
+  client_id: 7
+  timezone: America/New_York
+  use_rth: true
+  data_directory: data/nasdaq
+update:
+  bar_size: "1 min"
+  what_to_show: TRADES
+  start_date: 2011-01-01
+  throttle_seconds: 0.25
+```
+
+and run:
+
+```bash
+python -m ibkr_py_wzr.data_center --config configs/nasdaq.yaml
+```
+
+Any CLI flag provided alongside `--config` overrides the value stored in the
+file, making it straightforward to reuse defaults while experimenting with
+different backfill windows or data directories.
+
+> **Note**
+> The historical bars returned by Interactive Brokers reflect the market data
+> permissions available to your account.  If you subscribe to the live NASDAQ
+> feed the dataset contains real-time bars.  Accounts without live access receive
+> the delayed stream (typically 15 minutes) instead, even though the download
+> workflow remains identical.
+
 Saved files can be reloaded later without hitting the IBKR API:
 
 ```python
