@@ -180,10 +180,14 @@ class IBKRDataCenter:
             useRTH=self.use_rth,
             formatDate=1,
         )
-        df = util.df(bars)
-        if df.empty:
+        if not bars:
             LOGGER.warning("No historical data returned for symbol %s", symbol)
-            return df
+            return pd.DataFrame()
+
+        df = util.df(bars)
+        if df is None or df.empty:
+            LOGGER.warning("No historical data returned for symbol %s", symbol)
+            return pd.DataFrame() if df is None else df
 
         df.set_index("date", inplace=True)
         df.index = df.index.tz_localize("UTC").tz_convert(self.timezone)
