@@ -9,6 +9,10 @@ data_center:
   use_rth: true
   # IANA timezone name used to localise timestamps
   timezone: America/New_York
+  # Default exchange routing. ARCA is used by default but can be overridden here
+  # if you need to request data from another venue.
+  exchange: ARCA
+  primary_exchange: ARCA
   # Directory where per-symbol parquet files will be stored. Existing files in
   # this directory are inspected to decide whether an incremental or full
   # refresh is required.

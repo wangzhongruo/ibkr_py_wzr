@@ -83,6 +83,10 @@ data_center:
   client_id: 7
   timezone: America/New_York
   use_rth: true
+  # Default venue routing for stock contracts. The NASDAQ workflow now
+  # targets ARCA by default but any supported exchange can be specified here.
+  exchange: ARCA
+  primary_exchange: ARCA
   data_directory: data/nasdaq
   nasdaq_listing_url: https://ftp.nasdaqtrader.com/dynamic/symdir/nasdaqtraded.txt
   nasdaq_listing_fallback_urls:
@@ -113,6 +117,12 @@ date through the latest requested session the downloader performs an incremental
 update by appending only the newly available bars.  If the cache is missing or
 does not yet cover the requested period a full refresh is triggered and the
 parquet file is replaced with a fresh download from Interactive Brokers.
+
+By default both the per-ticker and universe download helpers instantiate IBKR
+stock contracts with ``ARCA`` as the exchange and primary exchange.  Override
+the ``exchange`` or ``primary_exchange`` keys in the YAML configuration (or pass
+the corresponding arguments directly when using the Python API) to point the
+requests at a different venue when required.
 
 Any CLI flag provided alongside `--config` overrides the value stored in the
 file, making it straightforward to reuse defaults while experimenting with

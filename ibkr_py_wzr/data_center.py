@@ -66,6 +66,9 @@ class IBKRDataCenter:
         When ``True`` only Regular Trading Hours data is returned.
     timezone:
         Target timezone (as a tz database string) for the returned data frame.
+    exchange, primary_exchange:
+        Default exchange routing details applied when creating stock contracts.
+        Both default to ``ARCA`` but can be overridden to target another venue.
     nasdaq_listing_url, nasdaq_listing_fallback_urls,
     nasdaq_listing_timeout, nasdaq_listing_retries, nasdaq_listing_retry_backoff:
         Control the source URLs as well as the timeout and retry behaviour when
@@ -78,6 +81,8 @@ class IBKRDataCenter:
     use_rth: bool = True
     timezone: str = "America/New_York"
     data_directory: Path = Path("data/nasdaq")
+    exchange: str = "ARCA"
+    primary_exchange: Optional[str] = "ARCA"
     nasdaq_listing_url: str = (
         "https://ftp.nasdaqtrader.com/dynamic/symdir/nasdaqtraded.txt"
     )
@@ -116,6 +121,7 @@ class IBKRDataCenter:
         end_datetime: Optional[datetime] = None,
         what_to_show: str = "TRADES",
         bar_size: str = "1 min",
+        exchange: Optional[str] = None,
         primary_exchange: Optional[str] = None,
         save_to: Optional[Path] = None,
     ) -> pd.DataFrame:
@@ -139,9 +145,14 @@ class IBKRDataCenter:
         bar_size:
             Granularity of the returned bars (``1 min``, ``1 hour``, ``1 day``
             ...).  The value must be a valid Interactive Brokers bar size.
+        exchange:
+            Exchange used when instantiating the :class:`ib_insync.Stock`
+            contract.  Defaults to the data centre's configured exchange
+            (``ARCA`` by default).
         primary_exchange:
             Optional primary exchange hint supplied to the contract to improve
-            symbol disambiguation.
+            symbol disambiguation.  Defaults to the data centre's configured
+            primary exchange (also ``ARCA`` by default).
         save_to:
             Optional path for persisting the result.  Supported suffixes are
             ``.parquet``, ``.pq``, ``.pkl`` and ``.pickle``.
@@ -153,10 +164,22 @@ class IBKRDataCenter:
         """
         self.connect()
 
-        if primary_exchange:
-            contract = Stock(symbol, "SMART", "USD", primaryExchange=primary_exchange)
+        contract_exchange = exchange or self.exchange or "SMART"
+        contract_primary_exchange = (
+            primary_exchange
+            if primary_exchange is not None
+            else self.primary_exchange
+        )
+
+        if contract_primary_exchange:
+            contract = Stock(
+                symbol,
+                contract_exchange,
+                "USD",
+                primaryExchange=contract_primary_exchange,
+            )
         else:
-            contract = Stock(symbol, "SMART", "USD")
+            contract = Stock(symbol, contract_exchange, "USD")
         self._ib.qualifyContracts(contract)
 
         request_end = end_datetime
@@ -229,6 +252,7 @@ class IBKRDataCenter:
         end_datetime: Optional[datetime] = None,
         what_to_show: str = "TRADES",
         bar_size: str = "1 min",
+        exchange: Optional[str] = None,
         primary_exchange: Optional[str] = None,
         save_to: Optional[Path] = None,
         throttle_seconds: float = 0.0,
@@ -241,7 +265,8 @@ class IBKRDataCenter:
         symbols:
             Iterable of ticker symbols that should be requested from Interactive
             Brokers.
-        duration, start_datetime, end_datetime, what_to_show, bar_size:
+        duration, start_datetime, end_datetime, what_to_show, bar_size,
+        exchange, primary_exchange:
             Identical to :meth:`download_intraday_bars`.
         save_to:
             Optional path used to persist the concatenated universe.  When
@@ -295,6 +320,7 @@ class IBKRDataCenter:
                 end_datetime=end_datetime,
                 what_to_show=what_to_show,
                 bar_size=bar_size,
+                exchange=exchange,
                 primary_exchange=primary_exchange,
             )
             if frame.empty:
@@ -503,7 +529,8 @@ class IBKRDataCenter:
             end_datetime=request_end,
             what_to_show=what_to_show,
             bar_size=bar_size,
-            primary_exchange="NASDAQ",
+            exchange=self.exchange,
+            primary_exchange=self.primary_exchange,
         )
 
         if new_data.empty:
@@ -621,6 +648,8 @@ class IBKRDataCenter:
                 client_id=client_id,
                 use_rth=self.use_rth,
                 timezone=self.timezone,
+                exchange=self.exchange,
+                primary_exchange=self.primary_exchange,
                 data_directory=data_dir,
                 nasdaq_listing_url=self.nasdaq_listing_url,
                 nasdaq_listing_fallback_urls=self.nasdaq_listing_fallback_urls,
