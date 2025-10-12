@@ -1,0 +1,611 @@
+"""Utilities for downloading historical data from Interactive Brokers.
+
+This module wraps ``ib_insync`` and provides a thin abstraction that makes it
+simple to download US equity data with a configurable bar size.  The resulting
+data is returned as a :class:`pandas.DataFrame` and can optionally be persisted
+to disk.
+
+Example
+-------
+>>> from ibkr_py_wzr.data_center import IBKRDataCenter
+>>> data_center = IBKRDataCenter()
+>>> data_center.connect()
+>>> df = data_center.download_intraday_bars("AAPL", duration="5 D", bar_size="1 min")
+>>> data_center.disconnect()
+
+The data frame contains the standard OHLCV columns that are produced by
+``reqHistoricalData``: ``open``, ``high``, ``low``, ``close``, ``volume``,
+``bar_count`` and ``average_price``.  If a ``save_to`` path is supplied the data
+frame is also written as a parquet or pickle file depending on the suffix.  The
+latency of the downloaded bars mirrors the market data subscriptions available
+to the connected IBKR account: live feeds yield real-time bars, while accounts
+without live permissions receive the delayed (typically 15 minute) stream.
+"""
+from __future__ import annotations
+
+import io
+import logging
+import math
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from time import sleep
+from typing import Any, Optional, Sequence
+
+import pandas as pd
+import requests
+from zoneinfo import ZoneInfo
+import yaml
+
+try:  # pragma: no cover - allows the code to be imported without ib_insync.
+    from ib_insync import IB, BarDataList, Stock, util
+except Exception as exc:  # pragma: no cover - keeps import error informative.
+    raise ImportError(
+        "ib_insync must be installed to use IBKRDataCenter."
+    ) from exc
+
+LOGGER = logging.getLogger(__name__)
+
+
+@dataclass
+class IBKRDataCenter:
+    """Download historical bar data from Interactive Brokers.
+
+    Parameters
+    ----------
+    host, port, client_id:
+        Connection details for TWS or IB Gateway.
+    use_rth:
+        When ``True`` only Regular Trading Hours data is returned.
+    timezone:
+        Target timezone (as a tz database string) for the returned data frame.
+    """
+
+    host: str = "127.0.0.1"
+    port: int = 7497
+    client_id: int = 1
+    use_rth: bool = True
+    timezone: str = "America/New_York"
+    data_directory: Path = Path("data/nasdaq")
+    nasdaq_listing_url: str = (
+        "https://ftp.nasdaqtrader.com/dynamic/symdir/nasdaqtraded.txt"
+    )
+    _ib: IB = field(default_factory=IB, init=False, repr=False)
+
+    def connect(self) -> None:
+        """Connect to IBKR if not connected already."""
+        if not self._ib.isConnected():
+            LOGGER.info(
+                "Connecting to IBKR at %s:%s with client id %s",
+                self.host,
+                self.port,
+                self.client_id,
+            )
+            self._ib.connect(self.host, self.port, clientId=self.client_id)
+
+    def disconnect(self) -> None:
+        """Close the IBKR connection."""
+        if self._ib.isConnected():
+            LOGGER.info("Disconnecting from IBKR")
+            self._ib.disconnect()
+
+    def download_intraday_bars(
+        self,
+        symbol: str,
+        duration: str = "1 D",
+        start_datetime: Optional[datetime] = None,
+        end_datetime: Optional[datetime] = None,
+        what_to_show: str = "TRADES",
+        bar_size: str = "1 min",
+        primary_exchange: Optional[str] = None,
+        save_to: Optional[Path] = None,
+    ) -> pd.DataFrame:
+        """Download historical bars for the provided symbol.
+
+        Parameters
+        ----------
+        symbol:
+            Ticker symbol of the US equity.
+        duration:
+            How far back to fetch data (Interactive Brokers duration string).
+            Ignored when ``start_datetime`` is provided.
+        start_datetime:
+            Optional start time for the historical request.  When provided the
+            ``duration`` argument is ignored and the request duration is
+            inferred from ``start_datetime`` and ``end_datetime``.
+        end_datetime:
+            The end time for the historical request.  ``None`` means "now".
+        what_to_show:
+            Which data type should be returned (``TRADES`` / ``MIDPOINT`` ...).
+        bar_size:
+            Granularity of the returned bars (``1 min``, ``1 hour``, ``1 day``
+            ...).  The value must be a valid Interactive Brokers bar size.
+        primary_exchange:
+            Optional primary exchange hint supplied to the contract to improve
+            symbol disambiguation.
+        save_to:
+            Optional path for persisting the result.  Supported suffixes are
+            ``.parquet``, ``.pq``, ``.pkl`` and ``.pickle``.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Data frame indexed by timezone aware timestamps with OHLCV columns.
+        """
+        self.connect()
+
+        if primary_exchange:
+            contract = Stock(symbol, "SMART", "USD", primaryExchange=primary_exchange)
+        else:
+            contract = Stock(symbol, "SMART", "USD")
+        self._ib.qualifyContracts(contract)
+
+        request_end = end_datetime
+        duration_str = duration
+
+        if start_datetime is not None:
+            if end_datetime is None:
+                request_end = datetime.now(tz=start_datetime.tzinfo)
+            if request_end <= start_datetime:
+                raise ValueError(
+                    "start_datetime must be before end_datetime"
+                )
+            duration_str = self._duration_from_range(start_datetime, request_end)
+
+        bars: BarDataList = self._ib.reqHistoricalData(
+            contract=contract,
+            endDateTime=request_end,
+            durationStr=duration_str,
+            barSizeSetting=bar_size,
+            whatToShow=what_to_show,
+            useRTH=self.use_rth,
+            formatDate=1,
+        )
+        df = util.df(bars)
+        if df.empty:
+            LOGGER.warning("No historical data returned for symbol %s", symbol)
+            return df
+
+        df.set_index("date", inplace=True)
+        df.index = df.index.tz_localize("UTC").tz_convert(self.timezone)
+        df.index.name = "timestamp"
+        df.rename(
+            columns={
+                "volume": "volume",
+                "barCount": "bar_count",
+                "average": "average_price",
+            },
+            inplace=True,
+        )
+
+        LOGGER.info(
+            "Downloaded %s rows of data for %s", len(df.index), symbol
+        )
+
+        if save_to is not None:
+            save_path = Path(save_to)
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            suffix = save_path.suffix.lower()
+            if suffix in {".parquet", ".pq"}:
+                df.to_parquet(save_path)
+            elif suffix in {".pkl", ".pickle"}:
+                df.to_pickle(save_path)
+            else:  # pragma: no cover - defensive coding
+                raise ValueError(
+                    "save_to must have a .parquet, .pq, .pkl or .pickle extension"
+                )
+            LOGGER.info("Saved data to %s", save_path)
+
+        return df
+
+    def download_equity_universe(
+        self,
+        symbols: Sequence[str],
+        duration: str = "1 D",
+        start_datetime: Optional[datetime] = None,
+        end_datetime: Optional[datetime] = None,
+        what_to_show: str = "TRADES",
+        bar_size: str = "1 min",
+        primary_exchange: Optional[str] = None,
+        save_to: Optional[Path] = None,
+        throttle_seconds: float = 0.0,
+    ) -> pd.DataFrame:
+        """Download historical bars for multiple symbols and combine the results.
+
+        Parameters
+        ----------
+        symbols:
+            Iterable of ticker symbols that should be requested from Interactive
+            Brokers.
+        duration, start_datetime, end_datetime, what_to_show, bar_size:
+            Identical to :meth:`download_intraday_bars`.
+        save_to:
+            Optional path used to persist the concatenated universe.  When
+            provided the combined data frame is stored as parquet or pickle.
+        throttle_seconds:
+            Optional delay inserted between requests to avoid pacing violations
+            for particularly large universes.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Multi-indexed data frame keyed by ``timestamp`` and ``symbol``.
+        """
+
+        unique_symbols = list(dict.fromkeys(symbols))
+        if not unique_symbols:
+            raise ValueError("symbols must contain at least one entry")
+
+        combined_frames: list[pd.DataFrame] = []
+        self.connect()
+
+        for idx, ticker in enumerate(unique_symbols, start=1):
+            LOGGER.info(
+                "Downloading data for %s (%s/%s)", ticker, idx, len(unique_symbols)
+            )
+            frame = self.download_intraday_bars(
+                ticker,
+                duration=duration,
+                start_datetime=start_datetime,
+                end_datetime=end_datetime,
+                what_to_show=what_to_show,
+                bar_size=bar_size,
+                primary_exchange=primary_exchange,
+            )
+            if frame.empty:
+                LOGGER.warning("Skipping %s - no data returned", ticker)
+                continue
+
+            frame = frame.copy()
+            frame["symbol"] = ticker
+            frame.set_index("symbol", append=True, inplace=True)
+            frame = frame.reorder_levels(["timestamp", "symbol"])
+            frame.sort_index(inplace=True)
+            combined_frames.append(frame)
+
+            if throttle_seconds > 0 and idx < len(unique_symbols):
+                sleep(throttle_seconds)
+
+        if not combined_frames:
+            LOGGER.warning("No data downloaded for requested universe")
+            combined = pd.DataFrame()
+        else:
+            combined = pd.concat(combined_frames).sort_index()
+
+        if save_to is not None and not combined.empty:
+            save_path = Path(save_to)
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            suffix = save_path.suffix.lower()
+            if suffix in {".parquet", ".pq"}:
+                combined.to_parquet(save_path)
+            elif suffix in {".pkl", ".pickle"}:
+                combined.to_pickle(save_path)
+            else:  # pragma: no cover - defensive coding
+                raise ValueError(
+                    "save_to must have a .parquet, .pq, .pkl or .pickle extension"
+                )
+            LOGGER.info(
+                "Saved universe data (%s symbols) to %s",
+                len(combined.index.get_level_values("symbol").unique())
+                if not combined.empty
+                else 0,
+                save_path,
+            )
+
+        return combined
+
+    def fetch_nasdaq_symbols(self) -> list[str]:
+        """Return the complete list of NASDAQ-listed equities."""
+
+        LOGGER.info("Downloading NASDAQ listings from %s", self.nasdaq_listing_url)
+        response = requests.get(self.nasdaq_listing_url, timeout=30)
+        response.raise_for_status()
+
+        buffer = io.StringIO(response.text)
+        listings = pd.read_csv(
+            buffer,
+            sep="|",
+            dtype=str,
+            engine="python",
+        )
+        listings = listings[listings["Symbol"].notna()]
+        listings = listings[listings["Symbol"].str.strip() != ""]
+        listings = listings[
+            ~listings["Symbol"].str.contains("File Creation Time", case=False, na=False)
+        ]
+        if "Test Issue" in listings.columns:
+            listings = listings[listings["Test Issue"] != "Y"]
+        if "ETF" in listings.columns:
+            listings = listings[listings["ETF"] != "Y"]
+        if "Listing Exchange" in listings.columns:
+            listings = listings[listings["Listing Exchange"].str.upper().isin({"Q"})]
+        symbols = sorted(listings["Symbol"].str.upper().unique())
+        LOGGER.info("Resolved %s NASDAQ symbols", len(symbols))
+        return symbols
+
+    def update_symbol_history(
+        self,
+        symbol: str,
+        *,
+        bar_size: str,
+        what_to_show: str,
+        start_datetime: datetime,
+        end_datetime: Optional[datetime],
+        data_directory: Path,
+    ) -> None:
+        """Ensure the local history for ``symbol`` is up to date."""
+
+        symbol_path = data_directory / self._symbol_filename(symbol, bar_size)
+        LOGGER.debug("Updating %s using %s", symbol, symbol_path)
+
+        existing: Optional[pd.DataFrame]
+        if symbol_path.exists():
+            existing = pd.read_parquet(symbol_path)
+            if not existing.empty:
+                existing.sort_index(inplace=True)
+                if existing.index.tz is None:
+                    existing.index = existing.index.tz_localize(self.timezone)
+        else:
+            existing = None
+
+        tz = ZoneInfo(self.timezone)
+        request_start = self._ensure_timezone(start_datetime, tz)
+        if existing is not None and not existing.empty:
+            last_timestamp = existing.index.max()
+            if last_timestamp.tzinfo is None:
+                last_timestamp = last_timestamp.tz_localize(tz)
+            else:
+                last_timestamp = last_timestamp.astimezone(tz)
+            request_start = max(request_start, last_timestamp + self._bar_size_to_offset(bar_size))
+
+        if end_datetime is not None:
+            request_end = self._ensure_timezone(end_datetime, tz)
+            if request_start >= request_end:
+                LOGGER.info("%s already up to date (no newer data before %s)", symbol, request_end)
+                return
+        else:
+            request_end = None
+
+        new_data = self.download_intraday_bars(
+            symbol,
+            start_datetime=request_start,
+            end_datetime=request_end,
+            what_to_show=what_to_show,
+            bar_size=bar_size,
+            primary_exchange="NASDAQ",
+        )
+
+        if new_data.empty:
+            LOGGER.info("No new data returned for %s", symbol)
+            return
+
+        if existing is not None and not existing.empty:
+            combined = pd.concat([existing, new_data])
+            combined = combined[~combined.index.duplicated(keep="last")]
+        else:
+            combined = new_data
+
+        combined.sort_index(inplace=True)
+
+        symbol_path.parent.mkdir(parents=True, exist_ok=True)
+        combined.to_parquet(symbol_path)
+        LOGGER.info("Stored %s rows for %s", len(combined.index), symbol)
+
+    def update_nasdaq_history(
+        self,
+        *,
+        bar_size: str = "1 min",
+        what_to_show: str = "TRADES",
+        start_date: Optional[datetime] = None,
+        end_datetime: Optional[datetime] = None,
+        data_directory: Optional[Path] = None,
+        throttle_seconds: float = 0.2,
+    ) -> None:
+        """Download and incrementally update NASDAQ equity data."""
+
+        symbols = self.fetch_nasdaq_symbols()
+        tz = ZoneInfo(self.timezone)
+        start_dt = self._ensure_timezone(start_date, tz) if start_date else datetime(2011, 1, 1, tzinfo=tz)
+        data_dir = Path(data_directory) if data_directory else self.data_directory
+        data_dir.mkdir(parents=True, exist_ok=True)
+
+        self.connect()
+        try:
+            for idx, symbol in enumerate(symbols, start=1):
+                LOGGER.info("(%s/%s) Updating %s", idx, len(symbols), symbol)
+                self.update_symbol_history(
+                    symbol,
+                    bar_size=bar_size,
+                    what_to_show=what_to_show,
+                    start_datetime=start_dt,
+                    end_datetime=end_datetime,
+                    data_directory=data_dir,
+                )
+                if throttle_seconds and idx < len(symbols):
+                    sleep(throttle_seconds)
+        finally:
+            self.disconnect()
+
+    @staticmethod
+    def _bar_size_to_offset(bar_size: str) -> pd.Timedelta:
+        amount_str, unit = bar_size.split()
+        amount = int(amount_str)
+        unit = unit.lower()
+        if unit.startswith("sec"):
+            return pd.Timedelta(seconds=amount)
+        if unit.startswith("min"):
+            return pd.Timedelta(minutes=amount)
+        if unit.startswith("hour"):
+            return pd.Timedelta(hours=amount)
+        if unit.startswith("day"):
+            return pd.Timedelta(days=amount)
+        if unit.startswith("week"):
+            return pd.Timedelta(weeks=amount)
+        raise ValueError(f"Unsupported bar size: {bar_size}")
+
+    @staticmethod
+    def _ensure_timezone(dt: datetime, tz: ZoneInfo) -> datetime:
+        if isinstance(dt, pd.Timestamp):
+            if dt.tzinfo is None:
+                return dt.tz_localize(tz).to_pydatetime()
+            return dt.tz_convert(tz).to_pydatetime()
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=tz)
+        return dt.astimezone(tz)
+
+    @staticmethod
+    def _symbol_filename(symbol: str, bar_size: str) -> str:
+        clean_symbol = "".join(ch if ch.isalnum() else "_" for ch in symbol.upper())
+        suffix = bar_size.replace(" ", "").lower()
+        return f"{clean_symbol}_{suffix}.parquet"
+
+    @staticmethod
+    def _duration_from_range(start: datetime, end: datetime) -> str:
+        """Return an IBKR duration string that spans ``start`` to ``end``."""
+
+        delta = end - start
+        total_seconds = delta.total_seconds()
+        if total_seconds <= 0:
+            raise ValueError("end must be after start")
+
+        if total_seconds < 24 * 60 * 60:
+            return f"{math.ceil(total_seconds)} S"
+
+        days = total_seconds / (24 * 60 * 60)
+        if days < 7:
+            return f"{math.ceil(days)} D"
+
+        weeks = days / 7
+        if weeks < 52:
+            return f"{math.ceil(weeks)} W"
+
+        months = days / 30
+        if months < 12:
+            return f"{math.ceil(months)} M"
+
+        years = days / 365
+        return f"{math.ceil(years)} Y"
+
+    @property
+    def ib(self) -> IB:
+        """Expose the underlying :class:`ib_insync.IB` instance."""
+        return self._ib
+
+
+def _load_yaml_config(path: Path) -> dict[str, Any]:
+    """Return the configuration stored in ``path`` or an empty dictionary."""
+
+    with path.open("r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle) or {}
+    if not isinstance(data, dict):
+        raise ValueError("The YAML configuration must define a mapping at the top level")
+    return data
+
+
+def _maybe_parse_datetime(value: Any) -> Optional[datetime]:
+    """Return ``value`` as a :class:`datetime` if possible."""
+
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, pd.Timestamp):
+        return value.to_pydatetime()
+    return datetime.fromisoformat(str(value))
+
+
+def main() -> None:
+    """CLI helper for updating the NASDAQ data directory."""
+
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Download NASDAQ historical data")
+    parser.add_argument("--config", type=Path, default=None, help="Path to a YAML configuration file")
+    parser.add_argument("--bar-size", default=None, help="Bar size for historical data (overrides config)")
+    parser.add_argument(
+        "--what-to-show",
+        default=None,
+        help="Data type to request from IBKR (overrides config)",
+    )
+    parser.add_argument(
+        "--data-directory",
+        type=Path,
+        default=None,
+        help="Directory used to store parquet files (overrides config)",
+    )
+    parser.add_argument(
+        "--start-date",
+        default=None,
+        help="Optional ISO start date override (overrides config)",
+    )
+    parser.add_argument(
+        "--end-date",
+        default=None,
+        help="Optional ISO end date override (overrides config)",
+    )
+    parser.add_argument(
+        "--throttle",
+        type=float,
+        default=None,
+        help="Seconds to wait between requests (overrides config)",
+    )
+    args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+    config: dict[str, Any] = {}
+    if args.config is not None:
+        config = _load_yaml_config(args.config)
+
+    data_center_config = dict(config.get("data_center", {}))
+    update_config = dict(config.get("update", {}))
+
+    if args.bar_size is not None:
+        update_config["bar_size"] = args.bar_size
+    if args.what_to_show is not None:
+        update_config["what_to_show"] = args.what_to_show
+    if args.data_directory is not None:
+        update_config["data_directory"] = args.data_directory
+        data_center_config.setdefault("data_directory", args.data_directory)
+    if args.start_date is not None:
+        update_config["start_date"] = args.start_date
+    if args.end_date is not None:
+        update_config["end_datetime"] = args.end_date
+    if args.throttle is not None:
+        update_config["throttle_seconds"] = args.throttle
+
+    defaults = {
+        "bar_size": "1 min",
+        "what_to_show": "TRADES",
+        "throttle_seconds": 0.2,
+    }
+    for key, value in defaults.items():
+        update_config.setdefault(key, value)
+
+    if "start_date" not in update_config:
+        update_config["start_date"] = datetime(2011, 1, 1)
+
+    start_date = _maybe_parse_datetime(update_config.pop("start_date", None))
+    end_datetime = _maybe_parse_datetime(
+        update_config.pop("end_datetime", update_config.pop("end_date", None))
+    )
+
+    if "data_directory" in update_config and not isinstance(update_config["data_directory"], Path):
+        update_config["data_directory"] = Path(update_config["data_directory"])
+    if "data_directory" in data_center_config and not isinstance(
+        data_center_config["data_directory"], Path
+    ):
+        data_center_config["data_directory"] = Path(data_center_config["data_directory"])
+    if "throttle_seconds" in update_config:
+        update_config["throttle_seconds"] = float(update_config["throttle_seconds"])
+
+    data_center = IBKRDataCenter(**data_center_config)
+    data_center.update_nasdaq_history(
+        start_date=start_date,
+        end_datetime=end_datetime,
+        **update_config,
+    )
+
+
+if __name__ == "__main__":
+    main()
