@@ -84,6 +84,9 @@ data_center:
   timezone: America/New_York
   use_rth: true
   data_directory: data/nasdaq
+  nasdaq_listing_url: https://ftp.nasdaqtrader.com/dynamic/symdir/nasdaqtraded.txt
+  nasdaq_listing_fallback_urls:
+    - https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqtraded.txt
   # Optional HTTP tuning for the NASDAQ listings download
   nasdaq_listing_timeout: 45
   nasdaq_listing_retries: 5
@@ -124,9 +127,10 @@ limits and hardware allow.
 If your environment occasionally times out while retrieving the official
 NASDAQ listings feed the YAML values above can be adjusted to increase the
 request timeout, retry count or backoff delay.  The downloader now retries
-failed requests automatically and raises a descriptive error after the final
-attempt so that transient network issues no longer terminate the entire
-universe refresh without context.
+failed requests automatically and falls back to the alternative HTTPS URL when
+`ftp.nasdaqtrader.com` is unreachable before raising a descriptive error after
+the final attempt.  This ensures transient network issues no longer terminate
+the entire universe refresh without context.
 
 > **Note**
 > The historical bars returned by Interactive Brokers reflect the market data

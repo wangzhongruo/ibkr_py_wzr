@@ -13,6 +13,13 @@ data_center:
   # this directory are inspected to decide whether an incremental or full
   # refresh is required.
   data_directory: data/nasdaq
+  # Primary NASDAQ listings endpoint. Leave as null to rely solely on fallbacks.
+  nasdaq_listing_url: https://ftp.nasdaqtrader.com/dynamic/symdir/nasdaqtraded.txt
+  # Additional NASDAQ listings sources that will be attempted if the primary
+  # URL is unavailable. The default HTTPS host works in environments that block
+  # ftp.nasdaqtrader.com.
+  nasdaq_listing_fallback_urls:
+    - https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqtraded.txt
   # HTTP timeout (seconds) and retry behaviour for downloading the official
   # NASDAQ listings file. Increase these values if your environment frequently
   # times out when contacting ftp.nasdaqtrader.com.
